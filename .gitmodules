@@ -1,0 +1,6 @@
+[submodule "libs"]
+	path = libs
+	url = https://github.com/kazushiyamasaki/global_lock.h
+[submodule "mhashtable"]
+	path = mhashtable
+	url = https://github.com/kazushiyamasaki/mhashtable
