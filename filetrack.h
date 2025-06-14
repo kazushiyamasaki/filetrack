@@ -1,6 +1,6 @@
 /*
  * filetrack.h -- interface of a library to assist with file-related debugging
- * version 0.9.0, June 13, 2025
+ * version 0.9.2, June 14, 2025
  *
  * License: zlib License
  *
@@ -67,9 +67,6 @@
 #define FILETRACK_H
 
 
-#ifndef FILETRACK_DISABLE
-
-
 #include "mhashtable.h"
 
 
@@ -78,6 +75,23 @@ MHT_CPP_C_BEGIN
 
 #include <stdio.h>
 #include <stdlib.h>
+
+
+/*
+ * filetrack_errfunc is a global variable that stores the name of the function
+ * where the most recent error occurred within the hash table library.
+ *
+ * It is set to NULL when no error has occurred.
+ * This variable is used to provide more informative error diagnostics,
+ * especially in combination with errno.
+ *
+ * It is recommended to check this variable and errno after calling
+ * any library function that may fail.
+ */
+extern const char* filetrack_errfunc;
+
+
+#ifndef FILETRACK_DISABLE
 
 
 /*
@@ -153,6 +167,8 @@ extern int filetrack_remove (const char* filename, const char* file, int line);
 extern void filetrack_all_check (void);
 
 
+#endif  /* 以下は FILETRACK_DISABLE が定義されていても有効 */
+
 /*
  * The following function is not part of this library's original purpose, but we ended up
  * creating one that is generally useful during development, so we've decided to make it
@@ -166,7 +182,9 @@ extern void filetrack_all_check (void);
  * @return: a newly allocated string that is a duplicate of the input string, or NULL on failure
  * @note: the strings duplicated by this function must be freed with free()
  */
-extern char* filetrack_strndup (const char *string, size_t max_bytes);
+extern char* filetrack_strndup (const char* string, size_t max_bytes);
+
+#ifndef FILETRACK_DISABLE
 
 
 
@@ -249,10 +267,10 @@ extern void filetrack_entry_update (FILE* stream, const char* filename, const ch
 extern void filetrack_entry_close (FILE* stream, FileClosedType closed_type, const char* file, int line);
 
 
-MHT_CPP_C_END
-
-
 #endif
+
+
+MHT_CPP_C_END
 
 
 #endif
