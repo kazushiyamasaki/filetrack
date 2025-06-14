@@ -346,7 +346,7 @@ static FILE* filetrack_fopen_without_lock (const char* filename, const char* mod
 
 		filetrack_entry_add(stream, FILE_OPEN_FOPEN, filename, mode, file, line);
 
-		if (errno != 0) filetrack_errfunc = "filetrack_fopen";
+		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_fopen";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
 		else errno = tmp_errno;
 #endif
@@ -377,7 +377,7 @@ static FILE* filetrack_tmpfile_without_lock (const char* file, int line) {
 
 		filetrack_entry_add(stream, FILE_OPEN_TMPFILE, "unknown", "(tmpfile)", file, line);
 
-		if (errno != 0) filetrack_errfunc = "filetrack_tmpfile";
+		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_tmpfile";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
 		else errno = tmp_errno;
 #endif
@@ -442,7 +442,7 @@ static FILE* filetrack_freopen_without_lock (const char* filename, const char* m
 
 		filetrack_entry_update(new_stream, filename, mode, file, line);
 
-		if (errno != 0) filetrack_errfunc = "filetrack_freopen";
+		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_freopen";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
 		else errno = tmp_errno;
 #endif
@@ -454,7 +454,7 @@ static FILE* filetrack_freopen_without_lock (const char* filename, const char* m
 
 		filetrack_entry_close(stream, FILE_CLOSED_FREOPEN, file, line);
 
-		if (errno != 0) filetrack_errfunc = "filetrack_freopen";
+		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_freopen";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
 		else errno = tmp_errno;
 
@@ -464,7 +464,7 @@ static FILE* filetrack_freopen_without_lock (const char* filename, const char* m
 
 		filetrack_entry_add(new_stream, FILE_OPEN_FREOPEN, filename, mode, file, line);
 
-		if (errno != 0) filetrack_errfunc = "filetrack_freopen";
+		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_freopen";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
 		else errno = tmp_errno;
 #endif
@@ -560,7 +560,7 @@ static int filetrack_fclose_without_lock (FILE* stream, const char* file, int li
 
 	filetrack_entry_close(stream, FILE_CLOSED_FCLOSE, file, line);
 
-	if (errno != 0) filetrack_errfunc = "filetrack_fclose";
+	if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_fclose";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
 	else errno = tmp_errno;
 #endif
@@ -722,7 +722,7 @@ static void quit (void) {
 
 	ht_destroy(filetrack_entries);
 
-	if (errno != 0) filetrack_errfunc = "quit";
+	if (UNLIKELY(errno != 0)) filetrack_errfunc = "quit";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
 	else errno = tmp_errno;
 #endif
