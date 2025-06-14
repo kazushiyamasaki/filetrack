@@ -702,9 +702,10 @@ static void quit (void) {
 				if (UNLIKELY(!filetrack_entries_arr[i]->is_closed)) {
 					fprintf(stderr, "\nFile not closed!\nStream: %p   Mode: %s\nFile Name: %s\nopen Type: %s\nopen File: %s   Line: %d\nLast change mode File: %s   Line: %d\n", filetrack_entries_arr[i]->stream, filetrack_entries_arr[i]->mode, filetrack_entries_arr[i]->filename, FileClosedTypeNames[filetrack_entries_arr[i]->open_type], filetrack_entries_arr[i]->open_file, filetrack_entries_arr[i]->open_line, filetrack_entries_arr[i]->last_change_mode_file, filetrack_entries_arr[i]->last_change_mode_line);
 					errno = EPERM;
-					filetrack_errfunc = "quit";
 
 					filetrack_fclose_without_lock(filetrack_entries_arr[i]->stream, __FILE__, __LINE__);
+
+					filetrack_errfunc = "quit";
 				}
 				free(filetrack_entries_arr[i]->filename);
 				free(filetrack_entries_arr[i]->mode);
