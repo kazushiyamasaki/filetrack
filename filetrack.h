@@ -1,6 +1,6 @@
 /*
  * filetrack.h -- interface of a library to assist with file-related debugging
- * version 0.9.2, June 14, 2025
+ * version 0.9.3, June 15, 2025
  *
  * License: zlib License
  *
@@ -77,6 +77,15 @@ MHT_CPP_C_BEGIN
 #include <stdlib.h>
 
 
+#if defined (__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+	#define THREAD_LOCAL _Thread_local
+#elif defined (__GNUC__)
+	#define THREAD_LOCAL __thread
+#elif defined (_MSC_VER)
+	#define THREAD_LOCAL __declspec(thread)
+#endif
+
+
 /*
  * filetrack_errfunc is a global variable that stores the name of the function
  * where the most recent error occurred within the hash table library.
@@ -88,7 +97,11 @@ MHT_CPP_C_BEGIN
  * It is recommended to check this variable and errno after calling
  * any library function that may fail.
  */
-extern const char* filetrack_errfunc;
+#ifdef THREAD_LOCAL
+	extern THREAD_LOCAL const char* filetrack_errfunc;
+#else
+	extern const char* filetrack_errfunc;
+#endif
 
 
 #ifndef FILETRACK_DISABLE
