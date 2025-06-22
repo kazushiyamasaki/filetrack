@@ -28,7 +28,7 @@
 
 #include "ft_llapi.h"
 
-#define DEBUG
+
 #ifndef FILETRACK_DISABLE
 
 
