@@ -1,6 +1,6 @@
 /*
  * filetrack.c -- implementation part of a library to assist with file-related debugging
- * version 0.9.3, June 15, 2025
+ * version 0.9.5, June 22, 2025
  *
  * License: zlib License
  *
@@ -26,7 +26,11 @@
  * distribution.
  */
 
-#include "filetrack.h"
+#include "ft_llapi.h"
+
+#define DEBUG
+#ifndef FILETRACK_DISABLE
+
 
 #include <string.h>
 #include <errno.h>
@@ -34,6 +38,11 @@
 
 #if !defined (__STDC_VERSION__) || (__STDC_VERSION__ < 199901L)
 	#error "This program requires C99 or higher."
+#endif
+
+
+#if defined (_WIN32) && (!defined(_WIN32_WINNT) || (_WIN32_WINNT < 0x0600))
+	#error "This program requires Windows Vista or later. Define _WIN32_WINNT accordingly."
 #endif
 
 
@@ -46,54 +55,6 @@
 #endif
 
 
-#ifdef __GNUC__
-	#define LIKELY(x)   __builtin_expect(!!(x), 1)
-	#define UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-	#define LIKELY(x)   (x)
-	#define UNLIKELY(x) (x)
-#endif
-
-
-#undef malloc
-
-
-/* errno 記録時に関数名を記録する */
-#ifdef THREAD_LOCAL
-	THREAD_LOCAL const char* filetrack_errfunc = NULL;
-#else
-	const char* filetrack_errfunc = NULL;  /* 非スレッドセーフ */
-#endif
-
-
-char* filetrack_strndup (const char* string, size_t max_bytes) {
-	if (string == NULL) {
-		errno = EINVAL;
-		filetrack_errfunc = "filetrack_strndup";
-		return NULL;
-	}
-
-	/* stringの中に '\0' があるかをチェック */
-	const void* null_pos = memchr(string, '\0', max_bytes);
-
-	size_t len = null_pos ? (size_t)((const char*)null_pos - string) : max_bytes;
-
-	char* result = malloc(len + 1);
-	if (UNLIKELY(result == NULL)) {
-		errno = ENOMEM;
-		filetrack_errfunc = "filetrack_strndup";
-		return NULL;
-	}
-	memcpy(result, string, len);
-	result[len] = '\0';
-
-	return result;
-}
-
-
-#ifndef FILETRACK_DISABLE
-
-
 #undef fopen
 #undef freopen
 #undef tmpfile
@@ -102,6 +63,8 @@ char* filetrack_strndup (const char* string, size_t max_bytes) {
 
 #define FILETRACK_ENTRIES_COUNT 64
 #define FILETRACK_ENTRIES_TRIAL 4
+
+#define FT_MODE_LEN_MAX 16
 
 
 static const char* FileOpenTypeNames[] = {
@@ -139,7 +102,27 @@ typedef struct {
 } FileTrackEntry;  /* パディングの削減のため順序がわかりにくくなっているので注意 */
 
 
-static HashTable* filetrack_entries = NULL;
+#ifdef DEBUG
+typedef struct {
+	char* filename;
+	FILE* stream;
+} FilenameStreamEntry;
+#endif
+
+
+/* errno 記録時に関数名を記録する */
+#ifdef THREAD_LOCAL
+	THREAD_LOCAL const char* filetrack_errfunc = NULL;
+#else
+	const char* filetrack_errfunc = NULL;  /* 非スレッドセーフ */
+#endif
+
+
+static MHashTable* filetrack_entries = NULL;
+
+#ifdef DEBUG
+	static MHashTable* filename_stream_entries = NULL;
+#endif
 
 
 #define GLOBAL_LOCK_FUNC_NAME filetrack_lock
@@ -154,7 +137,7 @@ static void quit (void);
 /* 重要: この関数は必ずロックした後に呼び出す必要があります！ */
 static void init (void) {
 	for (size_t i = 0; i < FILETRACK_ENTRIES_TRIAL; i++) {
-		filetrack_entries = ht_create(FILETRACK_ENTRIES_COUNT);
+		filetrack_entries = mht_uint_create(FILETRACK_ENTRIES_COUNT);
 		if (LIKELY(filetrack_entries != NULL)) break;
 	}
 	if (UNLIKELY(filetrack_entries == NULL)) {
@@ -163,11 +146,19 @@ static void init (void) {
 		global_lock_quit();
 		exit(EXIT_FAILURE);
 	}
+
 	atexit(quit);
+
+#ifdef DEBUG
+	filename_stream_entries = mht_str_create(FILETRACK_ENTRIES_COUNT);
+	if (UNLIKELY(filename_stream_entries == NULL)) {
+		filetrack_errfunc = "init";
+	}
+#endif
 }
 
 
-void filetrack_entry_add (FILE* stream, FileOpenType open_type, const char* filename, const char* mode, const char* file, int line) {
+void filetrack_entry_add (FILE* stream, FileOpenType open_type, const char* filename, const char* mode, size_t filename_len_max, const char* file, int line) {
 	if (stream == NULL) {
 		fprintf(stderr, "stream is null! File cannot be tracked!\nFile: %s   Line: %d\n", file, line);
 		errno = EINVAL;
@@ -178,15 +169,20 @@ void filetrack_entry_add (FILE* stream, FileOpenType open_type, const char* file
 	if (UNLIKELY(filetrack_entries == NULL)) init();
 
 #ifdef DEBUG
-	size_t filename_len = strlen(filename);
-	char* filename_cpy = filetrack_strndup(filename, filename_len);
+	if (filename_len_max < 1) {
+		fprintf(stderr, "filename_len_max must be at least 1.\nFile: %s   Line: %d\n", file, line);
+		errno = EINVAL;
+		filetrack_errfunc = "filetrack_entry_add";
+		return;
+	}
+
+	char* filename_cpy = mutils_strndup(filename, filename_len_max);
 	if (UNLIKELY(filename_cpy == NULL)) {
 		fprintf(stderr, "Failed to duplicate filename string.\nFile: %s   Line: %d\n", file, line);
 		filetrack_errfunc = "filetrack_entry_add";
 	}
 
-	size_t mode_len = strlen(mode);
-	char* mode_cpy = filetrack_strndup(mode, mode_len);
+	char* mode_cpy = mutils_strndup(mode, FT_MODE_LEN_MAX);
 	if (UNLIKELY(mode_cpy == NULL)) {
 		fprintf(stderr, "Failed to duplicate mode string.\nFile: %s   Line: %d\n", file, line);
 		filetrack_errfunc = "filetrack_entry_add";
@@ -211,14 +207,29 @@ void filetrack_entry_add (FILE* stream, FileOpenType open_type, const char* file
 #endif
 	};
 
-	if (UNLIKELY(!ht_set(filetrack_entries, (key_type)stream, &entry, sizeof(FileTrackEntry)))) {
+	if (UNLIKELY(!mht_uint_set(filetrack_entries, (uint_keyt)stream, &entry, sizeof(FileTrackEntry)))) {
 		fprintf(stderr, "Failed to add entry to file tracking.\nFile: %s   Line: %d\n", file, line);
 		filetrack_errfunc = "filetrack_entry_add";
 #ifdef DEBUG
 		free(filename_cpy);
 		free(mode_cpy);
 #endif
+		return;
 	}
+
+#ifdef DEBUG
+	/* tmpfile はファイル名不明なので記録しない */
+	if (strncmp(mode_cpy, "(tmpfile)", 10) == 0) return;
+
+	FilenameStreamEntry filename_stream_entry = {
+		.filename = filename_cpy,
+		.stream = stream
+	};
+
+	if (UNLIKELY(!mht_str_set(filename_stream_entries, filename_cpy, &filename_stream_entry, sizeof(FilenameStreamEntry)))) {
+		filetrack_errfunc = "filetrack_entry_add";
+	}
+#endif
 }
 
 
@@ -244,24 +255,23 @@ void filetrack_entry_update (FILE* stream, const char* filename, const char* mod
 		errno = EPERM;
 		filetrack_errfunc = "filetrack_entry_update";
 
-		filetrack_entry_add(stream, FILE_OPEN_UNKNOWN, "unknown", mode, file, line);
+		filetrack_entry_add(stream, FILE_OPEN_UNKNOWN, "unknown", mode, 8, file, line);
 		return;
 	}
 
-	FileTrackEntry* entry = ht_get(filetrack_entries, (key_type)stream);
+	FileTrackEntry* entry = mht_uint_get(filetrack_entries, (uint_keyt)stream);
 	if (entry == NULL) {
 		fprintf(stderr, "No entry found to close! The file might not be tracked.\nFile: %s   Line: %d\n", file, line);
 		filetrack_errfunc = "filetrack_entry_update";
 
-		filetrack_entry_add(stream, FILE_OPEN_UNKNOWN, "unknown", mode, file, line);
+		filetrack_entry_add(stream, FILE_OPEN_UNKNOWN, "unknown", mode, 8, file, line);
 		return;
 	}
 
 #ifdef DEBUG
 	free(entry->mode);
 
-	size_t mode_len = strlen(mode);
-	char* mode_cpy = filetrack_strndup(mode, mode_len);
+	char* mode_cpy = mutils_strndup(mode, FT_MODE_LEN_MAX);
 	if (UNLIKELY(mode_cpy == NULL)) {
 		fprintf(stderr, "Failed to duplicate mode string.\nFile: %s   Line: %d\n", file, line);
 		filetrack_errfunc = "filetrack_entry_update";
@@ -291,7 +301,7 @@ void filetrack_entry_close (FILE* stream, FileClosedType closed_type, const char
 		return;
 	}
 
-	FileTrackEntry* entry = ht_get(filetrack_entries, (key_type)stream);
+	FileTrackEntry* entry = mht_uint_get(filetrack_entries, (uint_keyt)stream);
 	if (entry == NULL) {
 		fprintf(stderr, "No entry found to close! The file might not be tracked.\nFile: %s   Line: %d\n", file, line);
 		filetrack_errfunc = "filetrack_entry_close";
@@ -299,7 +309,7 @@ void filetrack_entry_close (FILE* stream, FileClosedType closed_type, const char
 	}
 
 #ifndef DEBUG
-	if (!ht_delete(filetrack_entries, (key_type)stream))
+	if (!mht_uint_delete(filetrack_entries, (uint_keyt)stream))
 		filetrack_errfunc = "filetrack_entry_close";
 #else
 	entry->is_closed = true;
@@ -310,7 +320,7 @@ void filetrack_entry_close (FILE* stream, FileClosedType closed_type, const char
 }
 
 
-static FILE* filetrack_fopen_without_lock (const char* filename, const char* mode, const char* file, int line) {
+static FILE* filetrack_fopen_without_lock (const char* filename, const char* mode, size_t filename_len_max, const char* file, int line) {
 	if (filename == NULL) {
 		fprintf(stderr, "No processing was done because the filename is NULL!\nFile: %s   Line: %d\n", file, line);
 		errno = EINVAL;
@@ -339,7 +349,31 @@ static FILE* filetrack_fopen_without_lock (const char* filename, const char* mod
 		return NULL;
 	}
 
-	FILE* stream = fopen(filename, mode);
+	if (filename_len_max < 1) {
+		fprintf(stderr, "filename_len_max must be at least 1.\nFile: %s   Line: %d\n", file, line);
+		errno = EINVAL;
+		filetrack_errfunc = "filetrack_fopen";
+		return;
+	}
+
+	char* filename_tmp = mutils_strndup(filename, filename_len_max);
+	if (filename_tmp == NULL) {
+		filetrack_errfunc = "filetrack_fopen";
+		return NULL;
+	}
+
+	char* mode_tmp = mutils_strndup(mode, FT_MODE_LEN_MAX);
+	if (mode_tmp == NULL) {
+		free(filename_tmp);
+		filetrack_errfunc = "filetrack_fopen";
+		return NULL;
+	}
+
+	FILE* stream = fopen(filename_tmp, mode_tmp);
+
+	free(filename_tmp);  /* ヌル終端を保証するためだけなのですぐに解放 */
+	free(mode_tmp);
+
 	if (UNLIKELY(stream == NULL)) {
 		fprintf(stderr, "Failed to open file '%s' with mode '%s'.\nFile: %s   Line: %d\n", filename, mode, file, line);
 		filetrack_errfunc = "filetrack_fopen";
@@ -349,7 +383,7 @@ static FILE* filetrack_fopen_without_lock (const char* filename, const char* mod
 #endif
 		errno = 0;
 
-		filetrack_entry_add(stream, FILE_OPEN_FOPEN, filename, mode, file, line);
+		filetrack_entry_add(stream, FILE_OPEN_FOPEN, filename, mode, filename_len_max, file, line);
 
 		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_fopen";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
@@ -360,9 +394,9 @@ static FILE* filetrack_fopen_without_lock (const char* filename, const char* mod
 }
 
 
-FILE* filetrack_fopen (const char* filename, const char* mode, const char* file, int line) {
+FILE* filetrack_fopen (const char* filename, const char* mode, size_t filename_len_max, const char* file, int line) {
 	filetrack_lock();
-	FILE* stream = filetrack_fopen_without_lock(filename, mode, file, line);
+	FILE* stream = filetrack_fopen_without_lock(filename, mode, filename_len_max, file, line);
 	filetrack_unlock();
 	return stream;
 }
@@ -380,7 +414,7 @@ static FILE* filetrack_tmpfile_without_lock (const char* file, int line) {
 #endif
 		errno = 0;
 
-		filetrack_entry_add(stream, FILE_OPEN_TMPFILE, "unknown", "(tmpfile)", file, line);
+		filetrack_entry_add(stream, FILE_OPEN_TMPFILE, "unknown", "(tmpfile)", 8, file, line);
 
 		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_tmpfile";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
@@ -399,7 +433,7 @@ FILE* filetrack_tmpfile (const char* file, int line) {
 }
 
 
-static FILE* filetrack_freopen_without_lock (const char* filename, const char* mode, FILE* stream, const char* file, int line) {
+static FILE* filetrack_freopen_without_lock (const char* filename, const char* mode, FILE* stream, size_t filename_len_max, const char* file, int line) {
 	if (filename != NULL && filename[0] == '\0') {
 		fprintf(stderr, "No processing was done because the filename is empty.\nFile: %s   Line: %d\n", file, line);
 		errno = EINVAL;
@@ -428,7 +462,31 @@ static FILE* filetrack_freopen_without_lock (const char* filename, const char* m
 		return NULL;
 	}
 
-	FILE* new_stream = freopen(filename, mode, stream);
+	if (filename_len_max < 1) {
+		fprintf(stderr, "filename_len_max must be at least 1.\nFile: %s   Line: %d\n", file, line);
+		errno = EINVAL;
+		filetrack_errfunc = "filetrack_freopen";
+		return;
+	}
+
+	char* filename_tmp = mutils_strndup(filename, filename_len_max);
+	if (filename_tmp == NULL) {
+		filetrack_errfunc = "filetrack_freopen";
+		return NULL;
+	}
+
+	char* mode_tmp = mutils_strndup(mode, FT_MODE_LEN_MAX);
+	if (mode_tmp == NULL) {
+		free(filename_tmp);
+		filetrack_errfunc = "filetrack_freopen";
+		return NULL;
+	}
+
+	FILE* new_stream = freopen(filename_tmp, mode_tmp, stream);
+
+	free(filename_tmp);  /* ヌル終端を保証するためだけなのですぐに解放 */
+	free(mode_tmp);
+
 	if (UNLIKELY(new_stream == NULL)) {
 		fprintf(stderr, "Failed to reopen file '%s' with mode '%s'.\nFile: %s   Line: %d\n", filename, mode, file, line);
 		filetrack_errfunc = "filetrack_freopen";
@@ -467,7 +525,7 @@ static FILE* filetrack_freopen_without_lock (const char* filename, const char* m
 #endif
 		errno = 0;
 
-		filetrack_entry_add(new_stream, FILE_OPEN_FREOPEN, filename, mode, file, line);
+		filetrack_entry_add(new_stream, FILE_OPEN_FREOPEN, filename, mode, filename_len_max, file, line);
 
 		if (UNLIKELY(errno != 0)) filetrack_errfunc = "filetrack_freopen";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
@@ -478,9 +536,9 @@ static FILE* filetrack_freopen_without_lock (const char* filename, const char* m
 }
 
 
-FILE* filetrack_freopen (const char* filename, const char* mode, FILE* stream, const char* file, int line) {
+FILE* filetrack_freopen (const char* filename, const char* mode, FILE* stream, size_t filename_len_max, const char* file, int line) {
 	filetrack_lock();
-	FILE* new_stream = filetrack_freopen_without_lock(filename, mode, stream, file, line);
+	FILE* new_stream = filetrack_freopen_without_lock(filename, mode, stream, filename_len_max, file, line);
 	filetrack_unlock();
 	return new_stream;
 }
@@ -530,7 +588,7 @@ static int filetrack_fclose_without_lock (FILE* stream, const char* file, int li
 		return return_value;
 	}
 
-	FileTrackEntry* entry = ht_get(filetrack_entries, (key_type)stream);
+	FileTrackEntry* entry = mht_uint_get(filetrack_entries, (uint_keyt)stream);
 	if (entry == NULL) {
 		fprintf(stderr, "No entry found to close! The file might not be tracked.\nFile: %s   Line: %d\n", file, line);
 		filetrack_errfunc = "filetrack_fclose";
@@ -583,7 +641,41 @@ int filetrack_fclose (FILE* stream, const char* file, int line) {
 
 
 #ifdef DEBUG
-int filetrack_remove (const char* filename, const char* file, int line) {
+static bool can_be_removed_check (const char* filename, size_t filename_len_max, const char* file, int line) {
+	size_t filename_len = mutils_strnlen(filename, filename_len_max);
+	if (UNLIKELY(filename_len == 0)) {  /* ファイル名の長さの取得に失敗した場合 */
+		fprintf(stderr, "Failed to retrieve the filename length.\nFile: %s   Line: %d\n", file, line);
+		filetrack_errfunc = "filetrack_remove";
+		return true;  /* エラーではあるが続行 */
+	}
+
+	str_keyt filename_key = {
+		.ptr = filename,
+		.len = filename_len
+	};
+
+	FilenameStreamEntry* filename_stream_entry = mht_str_get(filename_stream_entries, filename_key);
+	if (filename_stream_entry == NULL) return true;  /* 同じファイル名が記録されていない場合 */
+
+	FileTrackEntry* entry = mht_uint_get(filetrack_entries, (uint_keyt)filename_stream_entry->stream);
+	if (UNLIKELY(entry == NULL)) {  /* 構造が破損してエントリが見つからない場合 */
+		fprintf(stderr, "The filename_stream_entry corresponding to file '%s' exists, but no corresponding entry is found.\nFile: %s   Line: %d\n", filename, file, line);
+		errno = EPROTO;
+		filetrack_errfunc = "filetrack_remove";
+		return true;  /* エラーではあるが続行 */
+	}
+
+	if (entry->is_closed) return true;  /* 過去に開かれていたが既にクローズされている場合 */
+
+	/* 削除しようとしたファイルがまだオープンされている場合 */
+	fprintf(stderr, "File '%s' is still open and cannot be removed.\nFile: %s   Line: %d\n", filename, file, line);
+	errno = EINVAL;
+	filetrack_errfunc = "filetrack_remove";
+	return false;
+}
+
+
+int filetrack_remove (const char* filename, size_t filename_len_max, const char* file, int line) {
 	if (filename == NULL) {
 		fprintf(stderr, "No processing was done because the filename is NULL!\nFile: %s   Line: %d\n", file, line);
 		errno = EINVAL;
@@ -598,26 +690,16 @@ int filetrack_remove (const char* filename, const char* file, int line) {
 		return 1;
 	}
 
-	size_t filetrack_entries_arr_cnt;
-	FileTrackEntry** filetrack_entries_arr = (FileTrackEntry**)ht_all_get(filetrack_entries, &filetrack_entries_arr_cnt);
-	if (UNLIKELY(filetrack_entries_arr == NULL)) {
-		fprintf(stderr, "Failed to get all entries from file tracking.\nFile: %s   Line: %d\n", __FILE__, __LINE__);
+	if (filename_len_max < 1) {
+		fprintf(stderr, "filename_len_max must be at least 1.\nFile: %s   Line: %d\n", file, line);
+		errno = EINVAL;
 		filetrack_errfunc = "filetrack_remove";
+		return 1;
+	}
 
-	} else {
-		for (size_t i = 0; i < filetrack_entries_arr_cnt; i++) {
-			if ((strcmp(filetrack_entries_arr[i]->filename, filename) == 0) &&
-				(filetrack_entries_arr[i]->is_closed == false)) {
-				fprintf(stderr, "File '%s' is still open and cannot be removed.\nFile: %s   Line: %d\n", filename, file, line);
-				errno = EINVAL;
-				filetrack_errfunc = "filetrack_remove";
-
-				ht_all_release_arr(filetrack_entries_arr);
-				return 1;
-			}
-		}
-		if (!ht_all_release_arr(filetrack_entries_arr))
-			filetrack_errfunc = "filetrack_remove";
+	if (filename_stream_entries != NULL) {
+		if (!can_be_removed_check(filename, filename_len_max, file, line))
+			return 1;  /* 削除不可を確認した場合、エラーを返して終了 */
 	}
 
 	int result = remove(filename);
@@ -630,7 +712,7 @@ int filetrack_remove (const char* filename, const char* file, int line) {
 
 void filetrack_all_check (void) {
 	size_t filetrack_entries_arr_cnt;
-	FileTrackEntry** filetrack_entries_arr = (FileTrackEntry**)ht_all_get(filetrack_entries, &filetrack_entries_arr_cnt);
+	FileTrackEntry** filetrack_entries_arr = (FileTrackEntry**)mht_all_get(filetrack_entries, &filetrack_entries_arr_cnt);
 	if (UNLIKELY(filetrack_entries_arr == NULL)) {
 		fprintf(stderr, "Failed to get all entries from file tracking.\nFile: %s   Line: %d\n", __FILE__, __LINE__);
 		filetrack_errfunc = "filetrack_all_check";
@@ -664,7 +746,7 @@ void filetrack_all_check (void) {
 #endif
 			}
 		}
-		if (!ht_all_release_arr(filetrack_entries_arr))
+		if (!mht_all_release_arr(filetrack_entries_arr))
 			filetrack_errfunc = "filetrack_all_check";
 
 		printf("\n\n");
@@ -676,7 +758,7 @@ static void quit (void) {
 	size_t filetrack_entries_arr_cnt;
 	FileTrackEntry** filetrack_entries_arr;
 	for (size_t i = 0; i < FILETRACK_ENTRIES_TRIAL; i++) {
-		filetrack_entries_arr = (FileTrackEntry**)ht_all_get(filetrack_entries, &filetrack_entries_arr_cnt);
+		filetrack_entries_arr = (FileTrackEntry**)mht_all_get(filetrack_entries, &filetrack_entries_arr_cnt);
 		if (LIKELY(filetrack_entries_arr != NULL)) break;
 	}
 	if (UNLIKELY(filetrack_entries_arr == NULL)) {
@@ -717,7 +799,7 @@ static void quit (void) {
 #endif
 			}
 		}
-		if (!ht_all_release_arr(filetrack_entries_arr))
+		if (!mht_all_release_arr(filetrack_entries_arr))
 			filetrack_errfunc = "quit";
 	}
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
@@ -725,7 +807,7 @@ static void quit (void) {
 #endif
 	errno = 0;
 
-	ht_destroy(filetrack_entries);
+	mht_destroy(filetrack_entries);
 
 	if (UNLIKELY(errno != 0)) filetrack_errfunc = "quit";
 #ifdef MAYBE_ERRNO_THREAD_LOCAL
@@ -733,6 +815,23 @@ static void quit (void) {
 #endif
 
 	filetrack_entries = NULL;
+
+#ifdef DEBUG
+	if (filename_stream_entries != NULL) {
+#ifdef MAYBE_ERRNO_THREAD_LOCAL
+		int tmp_errno = errno;
+#endif
+		errno = 0;
+
+		mht_destroy(filename_stream_entries);
+
+		if (UNLIKELY(errno != 0)) filetrack_errfunc = "quit";
+#ifdef MAYBE_ERRNO_THREAD_LOCAL
+		else errno = tmp_errno;
+#endif
+		filename_stream_entries = NULL;
+	}
+#endif
 
 	global_lock_quit();
 }
